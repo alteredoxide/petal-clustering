@@ -1,4 +1,4 @@
-use ndarray::{Array1, ArrayBase, ArrayView1, ArrayView2, Data, Ix2};
+use ndarray::{Array1, ArrayBase, ArrayView1, ArrayView2, Data, Ix2, Ix1, OwnedRepr};
 use num_traits::{Float, FromPrimitive};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,21 @@ use super::Fit;
 use petal_neighbors::distance::{Euclidean, Metric};
 use petal_neighbors::BallTree;
 
+#[derive(Debug)]
+pub enum HDbscanError {
+    MSTNotComputed,  // when the min spanning tree has not been computed
+}
+
+impl std::fmt::Display for HDbscanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            Self::MSTNotComputed => write!(
+                f, "The minimum spanning tree has not been computed. Call `fit` first."
+            )
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HDbscan<A, M> {
     /// The radius of a neighborhood.
@@ -25,6 +40,150 @@ pub struct HDbscan<A, M> {
     pub min_cluster_size: usize,
     pub metric: M,
     pub boruvka: bool,
+    /// Whether or not to store the labeled, sorted MST.
+    pub store_mst: bool,
+    /// The labeled, sorted minimum spanning tree is Some only
+    /// after `fit` has been called and if `store_mst == true`.
+    pub mst: Option<Array1<(usize, usize, A, usize)>>,
+}
+
+impl<A, M> HDbscan<A, M>
+where
+    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    <A as std::convert::TryFrom<u32>>::Error: Debug,
+    M: Metric<A> + Clone + Sync + Send,
+{
+    /// Sets a new minimum cluster size for the clustering algorithm, and
+    /// returns updated clusters based on this new value.
+    ///
+    /// This method allows you to specify a different `min_cluster_size` 
+    /// than the one initially set when creating an HDbscan instance.
+    /// Adjusting this parameter can affect the granularity of clustering, 
+    /// potentially resulting in more or fewer clusters depending on its value.
+    ///
+    /// After setting a new `min_cluster_size` using this method, 
+    /// you should call `get_clusters()` to obtain the clusters based on 
+    /// the new setting.
+    ///
+    /// If you want to explore clusterings using different `min_cluster_size`
+    /// values without modifying the original parameter, you can use
+    /// `get_clusters()` by itself, and specify a different value.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The new minimum number of data points required to form a cluster.
+    ///
+    /// # Returns
+    ///
+    /// A Result<(HashMap<usize, Vec<usize>>, Vec<usize>), HDbscanError>
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use ndarray::array;
+    /// # use petal_clustering::{HDbscan, Fit};
+    /// # use petal_neighbors::distance::Euclidean;
+    /// let data = array![
+    ///     [-1.4, 2.0],
+    ///     [-1.5, 2.1],
+    ///     [-1.6, 2.0],
+    ///     [-1.7, 2.0],
+    ///     [-1.9, 2.0],
+    ///     [-2.0, 2.0],
+    ///     [-2.1, 2.0],
+    ///     [-2.1, 2.1],
+    /// ];
+    /// let mut hdbscan = HDbscan {
+    ///     min_samples: 4,
+    ///     min_cluster_size: 2,
+    ///     metric: Euclidean::default(),
+    ///     store_mst: true,
+    ///     ..Default::default()
+    /// };
+    /// let (clusters, outliers) = hdbscan.fit(&data);
+    /// let (new_clusters, new_outliers) = hdbscan
+    ///     .update_min_cluster_size(4)
+    ///     .unwrap();
+    /// # assert_eq!(clusters.len(), 2);
+    /// # assert_eq!(outliers.len(), 2);
+    /// # assert_eq!(new_clusters.len(), 0);
+    /// # assert_eq!(new_outliers.len(), 8);
+    /// # assert_eq!(hdbscan.min_cluster_size, 4);
+    /// ```
+    ///
+    /// If you want to explore clusters with a different minimum size without
+    /// updating the internal value, you can use the [`clusters_with_min_size`](HDbscan::clusters_with_min_size) method.
+    pub fn update_min_cluster_size(&mut self, size: usize)
+        -> Result<(HashMap<usize, Vec<usize>>, Vec<usize>), HDbscanError>
+    {
+        if self.mst.is_none() { return Err(HDbscanError::MSTNotComputed) }
+        self.min_cluster_size = size;
+        let labeled = self.mst.as_ref().unwrap().view();
+        let condensed = Array1::from_vec(condense_mst(labeled, size));
+        Ok(find_clusters(&condensed.view()))
+    }
+
+    /// Returns new clusters and outliers based on the specified minimumum
+    /// cluster size.
+    /// This will _not_ modify the internal `min_cluster_size` value.
+    ///
+    /// This method requires that `store_mst` is `true` and that `HDbscan.fit()`
+    /// has already been called on some data.
+    /// This leverages the stored Minimum Spanning Tree (MST) to generate
+    /// clusters without having to recompute the MST. If an optional
+    /// `min_cluster_size` is provided, it will use that value for clustering;
+    /// otherwise, it will use the value set in the HDbscan instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The minimum number of data points required to form a cluster.
+    ///
+    /// # Returns
+    ///
+    /// A Result<(HashMap<usize, Vec<usize>>, Vec<usize>), HDbscanError>
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use ndarray::array;
+    /// # use petal_clustering::{HDbscan, Fit};
+    /// # use petal_neighbors::distance::Euclidean;
+    /// # let data = array![
+    /// #     [-1.4, 2.0],
+    /// #     [-1.5, 2.1],
+    /// #     [-1.6, 2.0],
+    /// #     [-1.7, 2.0],
+    /// #     [-1.9, 2.0],
+    /// #     [-2.0, 2.0],
+    /// #     [-2.1, 2.0],
+    /// #     [-2.1, 2.1],
+    /// # ];
+    /// # let mut hdbscan = HDbscan {
+    /// #     min_samples: 4,
+    /// #     min_cluster_size: 2,
+    /// #     metric: Euclidean::default(),
+    /// #     store_mst: true,
+    /// #     ..Default::default()
+    /// # };
+    /// let (clusters, outliers) = hdbscan.fit(&data);
+    /// let (new_clusters, new_outliers) = hdbscan
+    ///     .clusters_with_min_size(4)
+    ///     .unwrap();
+    /// # assert_eq!(clusters.len(), 2);
+    /// # assert_eq!(outliers.len(), 2);
+    /// # assert_eq!(new_clusters.len(), 0);
+    /// # assert_eq!(new_outliers.len(), 8);
+    /// # assert_eq!(hdbscan.min_cluster_size, 2);  // unchanged
+    /// ```
+    pub fn clusters_with_min_size(&self, min_cluster_size: usize)
+        -> Result<(HashMap<usize, Vec<usize>>, Vec<usize>), HDbscanError>
+    {
+        if self.mst.is_none() { return Err(HDbscanError::MSTNotComputed) }
+        let labeled = self.mst.as_ref().unwrap().view();
+        let condensed = Array1::from_vec(condense_mst(labeled, min_cluster_size));
+        Ok(find_clusters(&condensed.view()))
+    }
+
 }
 
 impl<A> Default for HDbscan<A, Euclidean>
@@ -40,6 +199,8 @@ where
             min_cluster_size: 15,
             metric: Euclidean::default(),
             boruvka: true,
+            store_mst: false,
+            mst: None,
         }
     }
 }
@@ -87,7 +248,14 @@ where
         mst.sort_unstable_by(|a, b| a.2.partial_cmp(&(b.2)).expect("invalid distance"));
         let sorted_mst = Array1::from_vec(mst);
         let labeled = label(sorted_mst);
-        let condensed = Array1::from_vec(condense_mst(labeled.view(), self.min_cluster_size));
+        let mst_view = match self.store_mst {
+            true => {
+                self.mst = Some(labeled);
+                self.mst.as_ref().unwrap().view()
+            },
+            false => labeled.view()
+        };
+        let condensed = Array1::from_vec(condense_mst(mst_view, self.min_cluster_size));
         find_clusters(&condensed.view())
     }
 }
@@ -940,6 +1108,8 @@ mod test {
             min_cluster_size: 2,
             metric: Euclidean::default(),
             boruvka: false,
+            store_mst: false,
+            mst: None,
         };
         let (clusters, outliers) = hdbscan.fit(&data);
         assert_eq!(clusters.len(), 2);
