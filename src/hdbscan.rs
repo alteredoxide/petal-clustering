@@ -88,13 +88,20 @@ where
     ///     [-1.5, 2.1],
     ///     [-1.6, 2.0],
     ///     [-1.7, 2.0],
-    ///     [-1.9, 2.0],
-    ///     [-2.0, 2.0],
-    ///     [-2.1, 2.0],
-    ///     [-2.1, 2.1],
+    ///
+    ///     [1.7, 2.0],
+    ///
+    ///     [3.0, 2.0],
+    ///     [3.1, 2.1],
+    ///     [3.2, 2.1],
+    ///
+    ///     [4.0, 2.0],
+    ///     [4.1, 2.1],
+    ///     [4.2, 2.0],
     /// ];
+    ///
     /// let mut hdbscan = HDbscan {
-    ///     min_samples: 4,
+    ///     min_samples: 3,
     ///     min_cluster_size: 2,
     ///     metric: Euclidean::default(),
     ///     store_mst: true,
@@ -104,10 +111,10 @@ where
     /// let (new_clusters, new_outliers) = hdbscan
     ///     .update_min_cluster_size(4)
     ///     .unwrap();
-    /// # assert_eq!(clusters.len(), 2);
-    /// # assert_eq!(outliers.len(), 2);
-    /// # assert_eq!(new_clusters.len(), 0);
-    /// # assert_eq!(new_outliers.len(), 8);
+    /// # assert_eq!(clusters.len(), 3);
+    /// # assert_eq!(outliers.len(), 1);
+    /// # assert_eq!(new_clusters.len(), 2);
+    /// # assert_eq!(new_outliers.len(), 0);
     /// # assert_eq!(hdbscan.min_cluster_size, 4);
     /// ```
     ///
@@ -153,13 +160,19 @@ where
     /// #     [-1.5, 2.1],
     /// #     [-1.6, 2.0],
     /// #     [-1.7, 2.0],
-    /// #     [-1.9, 2.0],
-    /// #     [-2.0, 2.0],
-    /// #     [-2.1, 2.0],
-    /// #     [-2.1, 2.1],
+    ///
+    /// #     [1.7, 2.0],
+    ///
+    /// #     [3.0, 2.0],
+    /// #     [3.1, 2.1],
+    /// #     [3.2, 2.1],
+    ///
+    /// #     [4.0, 2.0],
+    /// #     [4.1, 2.1],
+    /// #     [4.2, 2.0],
     /// # ];
     /// # let mut hdbscan = HDbscan {
-    /// #     min_samples: 4,
+    /// #     min_samples: 3,
     /// #     min_cluster_size: 2,
     /// #     metric: Euclidean::default(),
     /// #     store_mst: true,
@@ -169,10 +182,10 @@ where
     /// let (new_clusters, new_outliers) = hdbscan
     ///     .clusters_with_min_size(4)
     ///     .unwrap();
-    /// # assert_eq!(clusters.len(), 2);
-    /// # assert_eq!(outliers.len(), 2);
-    /// # assert_eq!(new_clusters.len(), 0);
-    /// # assert_eq!(new_outliers.len(), 8);
+    /// # assert_eq!(clusters.len(), 3);
+    /// # assert_eq!(outliers.len(), 1);
+    /// # assert_eq!(new_clusters.len(), 2);
+    /// # assert_eq!(new_outliers.len(), 0);
     /// # assert_eq!(hdbscan.min_cluster_size, 2);  // unchanged
     /// ```
     pub fn clusters_with_min_size(&self, min_cluster_size: usize)
