@@ -22,9 +22,10 @@ pub enum HDbscanError {
 impl std::fmt::Display for HDbscanError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
-            Self::MSTNotComputed => write!(
-                f, "The minimum spanning tree has not been computed. Call `fit` first."
-            )
+            Self::MSTNotComputed => {
+                write!(f, r#"The minimum spanning tree has not been computed.
+Ensure `store_mst` is true and call `fit()` first."#)
+            }
         }
     }
 }
