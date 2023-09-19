@@ -14,6 +14,24 @@ use super::Fit;
 use petal_neighbors::distance::{Euclidean, Metric};
 use petal_neighbors::BallTree;
 
+#[derive(Debug)]
+pub enum HDbscanError {
+    CondensedTreeNotComputed,  // when the min spanning tree has not been computed
+}
+
+impl std::fmt::Display for HDbscanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match *self {
+            Self::CondensedTreeNotComputed => {
+                write!( f, r#"The condensed tree has not been computed;
+- ensure `store_condensed` is true,
+- call `fit()` first."#)
+            }
+        }
+    }
+}
+
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HDbscan<A, M> {
     /// The radius of a neighborhood.
@@ -25,6 +43,8 @@ pub struct HDbscan<A, M> {
     pub min_cluster_size: usize,
     pub metric: M,
     pub boruvka: bool,
+    pub store_condensed: bool,
+    pub condensed_tree: Option<Array1<(usize, usize, A, usize)>>,
 }
 
 impl<A> Default for HDbscan<A, Euclidean>
@@ -40,6 +60,8 @@ where
             min_cluster_size: 15,
             metric: Euclidean::default(),
             boruvka: true,
+            store_condensed: false,
+            condensed_tree: None,
         }
     }
 }
@@ -88,7 +110,11 @@ where
         let sorted_mst = Array1::from_vec(mst);
         let labeled = label(sorted_mst);
         let condensed = Array1::from_vec(condense_mst(labeled.view(), self.min_cluster_size));
-        find_clusters(&condensed.view())
+        let clusters = find_clusters(&condensed.view());
+        if self.store_condensed {
+            self.condensed_tree = Some(condensed)
+        }
+        clusters
     }
 }
 
@@ -940,6 +966,7 @@ mod test {
             min_cluster_size: 2,
             metric: Euclidean::default(),
             boruvka: false,
+            ..Default::default()
         };
         let (clusters, outliers) = hdbscan.fit(&data);
         assert_eq!(clusters.len(), 2);
