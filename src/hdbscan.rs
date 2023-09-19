@@ -47,6 +47,26 @@ pub struct HDbscan<A, M> {
     pub condensed_tree: Option<Array1<(usize, usize, A, usize)>>,
 }
 
+
+impl<A, M> HDbscan<A, M>
+where
+    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    <A as std::convert::TryFrom<u32>>::Error: Debug,
+    M: Metric<A> + Clone + Sync + Send,
+{
+    fn recurse_leaf_dfs(&self, cluster_id: usize)
+        -> Result<Vec<usize>, HDbscanError>
+    {
+        if self.condensed_tree.is_none() {
+            return Err(HDbscanError::CondensedTreeNotComputed)
+        }
+        let leafs = recurse_leaf_dfs(
+            self.condensed_tree.as_ref().unwrap(), cluster_id
+        );
+        Ok(leafs)
+    }
+}
+
 impl<A> Default for HDbscan<A, Euclidean>
 where
     A: Float,
@@ -117,6 +137,39 @@ where
         clusters
     }
 }
+
+/// Given a starting cluster id, use recursive depth-first-search to gather and
+/// return all leaf node ids.
+fn recurse_leaf_dfs<A>(
+    condensed_tree: &Array1<(usize, usize, A, usize)>,
+    cluster_id: usize
+) -> Vec<usize>
+    where
+        A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+{
+    //let children = self.condensed_tree.outer_iter().find(|&v| v.0 == &cluster_id);
+    let children: Vec<usize> = condensed_tree
+        .iter()
+        .filter_map(|&v| {
+            match v.0 == cluster_id {
+                false => None,
+                true => Some(v.1)
+            }
+        })
+        .collect();
+
+    if children.is_empty() {
+        return vec![cluster_id]
+    }
+
+    let out = children.into_iter()
+        .fold(vec![], |mut nodes, child| {
+            nodes.extend(recurse_leaf_dfs(condensed_tree, child));
+            nodes
+        });
+    out
+}
+
 
 fn mst_linkage<A: Float>(
     input: ArrayView2<A>,
@@ -974,6 +1027,20 @@ mod test {
             outliers.len(),
             data.nrows() - clusters.values().fold(0, |acc, v| acc + v.len())
         );
+    }
+
+    #[test]
+    fn recurse_leaf_dfs() {
+        use ndarray::array;
+
+        let condensed_tree = array![
+            (0, 1, 0.0, 0),
+            (0, 2, 0.0, 0),
+            (2, 3, 0.0, 0),
+            (3, 4, 0.0, 0),
+        ];
+        let descendants = super::recurse_leaf_dfs(&condensed_tree, 0);
+        assert_eq!(descendants, vec![1, 4]);
     }
 
     #[test]
