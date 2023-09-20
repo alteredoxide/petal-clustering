@@ -54,16 +54,94 @@ where
     <A as std::convert::TryFrom<u32>>::Error: Debug,
     M: Metric<A> + Clone + Sync + Send,
 {
+    /// Returns a vector of exemplars for a specified cluster id.
+    ///
+    /// # Returns
+    ///
+    /// - `Vec<usize>` where each element in the vec is the index of a single
+    ///   datapoint in the input data.
+    ///
+    /// # Example
+    /// ```
+    /// # use ndarray::array;
+    /// # use petal_clustering::{Fit, HDbscan, HDbscanError};
+    /// 
+    /// let data = array![
+    ///     [-1.4, 2.0],
+    ///     [-1.5, 2.1],
+    ///     [-1.6, 2.0],
+    ///     [-1.7, 2.0],
+    ///
+    ///     [1.7, 2.0],
+    ///
+    ///     [3.0, 2.0],
+    ///     [3.1, 2.1],
+    ///     [3.2, 2.1],
+    ///
+    ///     [4.0, 2.0],
+    ///     [4.1, 2.1],
+    ///     [4.2, 2.0],
+    /// ];
+    /// let mut hdbscan = HDbscan {
+    ///     min_samples: 3,
+    ///     min_cluster_size: 2,
+    ///     store_condensed: true,
+    ///     ..Default::default()
+    /// };
+    /// let (clusters, outliers) = hdbscan.fit(&data);
+    /// let exemplars = match hdbscan.exemplars(0) {
+    ///     Ok(ex) => ex,
+    ///     Err(e) => panic!("{}", e)
+    /// };
+    pub fn exemplars(&self, cluster_id: usize)
+        -> Result<Vec<usize>, HDbscanError>
+    {
+        if self.condensed_tree.is_none() {
+            return Err(HDbscanError::CondensedTreeNotComputed)
+        }
+        let mut out = Vec::new();
+        let leaves = match self.recurse_leaf_dfs(cluster_id) {
+            Err(e) => return Err(e),
+            Ok(l) => l
+        };
+        let condensed_tree = self.condensed_tree.as_ref().unwrap();
+        for leaf in leaves {
+            let leaf_max_lambda: A = condensed_tree
+                .iter()
+                .fold(A::zero(), |l_max, &v| {
+                    match v.0 == leaf {
+                        true => A::max(l_max, v.2),
+                        false => l_max
+                    }
+                });
+            let point_ids: Vec<usize> = condensed_tree
+                .iter()
+                .filter_map(|&v| {
+                    match (v.0 == leaf) && (v.2 == leaf_max_lambda) {
+                        true => Some(v.1),
+                        false => None,
+                    }
+                })
+                .collect();
+            out.extend(point_ids)
+        }
+        Ok(out)
+    }
+
     fn recurse_leaf_dfs(&self, cluster_id: usize)
         -> Result<Vec<usize>, HDbscanError>
     {
         if self.condensed_tree.is_none() {
             return Err(HDbscanError::CondensedTreeNotComputed)
         }
-        let leafs = recurse_leaf_dfs(
-            self.condensed_tree.as_ref().unwrap(), cluster_id
-        );
-        Ok(leafs)
+        let cluster_tree: Array1<&(usize, usize, A, usize)> = self.condensed_tree
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|&v| v.3 > 1)
+            .collect();
+        let leaves = recurse_leaf_dfs(&cluster_tree, cluster_id);
+        Ok(leaves)
     }
 }
 
@@ -138,10 +216,10 @@ where
     }
 }
 
-/// Given a starting cluster id, use recursive depth-first-search to gather and
-/// return all leaf node ids.
+/// Given a condensed tree and a starting cluster id, use recursive
+/// depth-first-search to gather and return all leaf node ids.
 fn recurse_leaf_dfs<A>(
-    condensed_tree: &Array1<(usize, usize, A, usize)>,
+    condensed_tree: &Array1<&(usize, usize, A, usize)>,
     cluster_id: usize
 ) -> Vec<usize>
     where
@@ -1039,7 +1117,10 @@ mod test {
             (2, 3, 0.0, 0),
             (3, 4, 0.0, 0),
         ];
-        let descendants = super::recurse_leaf_dfs(&condensed_tree, 0);
+        let descendants = super::recurse_leaf_dfs(
+            &condensed_tree.iter().collect(),
+            0
+        );
         assert_eq!(descendants, vec![1, 4]);
     }
 
