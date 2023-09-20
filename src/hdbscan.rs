@@ -89,10 +89,16 @@ where
     ///     ..Default::default()
     /// };
     /// let (clusters, outliers) = hdbscan.fit(&data);
-    /// let exemplars = match hdbscan.exemplars(0) {
+    /// let exemplars = match hdbscan.exemplars(12) {
     ///     Ok(ex) => ex,
     ///     Err(e) => panic!("{}", e)
     /// };
+    /// # let expected = vec![1, 2];
+    /// # assert_eq!(exemplars, expected);
+    /// # // NOTE: the expected values can be confirmed by inspecting the
+    /// # // condensed tree and seeing that 1 and 2 share the max lambda val for
+    /// # // elemts of cluster id 12.
+    /// ```
     pub fn exemplars(&self, cluster_id: usize)
         -> Result<Vec<usize>, HDbscanError>
     {
