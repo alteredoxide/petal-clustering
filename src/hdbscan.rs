@@ -185,7 +185,7 @@ where
         let db = BallTree::new(input.view(), self.metric.clone()).expect("non-empty array");
 
         let mut mst = if self.boruvka {
-            let boruvka = Boruvka::new(db, self.min_samples);
+            let boruvka = Boruvka::new(db, self.min_samples, self.alpha);
             boruvka.min_spanning_tree().into_raw_vec()
         } else {
             let core_distances = Array1::from_vec(
@@ -742,6 +742,7 @@ where
 {
     db: BallTree<'a, A, M>,
     min_samples: usize,
+    alpha: A,
     candidates: Candidates<A>,
     components: Components,
     core_distances: Array1<A>,
@@ -755,7 +756,7 @@ where
     A: Float + AddAssign + DivAssign + FromPrimitive + Sync + Send,
     M: Metric<A> + Sync + Send,
 {
-    fn new(db: BallTree<'a, A, M>, min_samples: usize) -> Self {
+    fn new(db: BallTree<'a, A, M>, min_samples: usize, alpha: A) -> Self {
         let mut candidates = Candidates::new(db.points.nrows());
         let components = Components::new(db.nodes.len(), db.points.nrows());
         let bounds = vec![A::max_value(); db.nodes.len()];
@@ -764,6 +765,7 @@ where
         Boruvka {
             db,
             min_samples,
+            alpha,
             candidates,
             components,
             core_distances,
@@ -873,6 +875,9 @@ where
                             .db
                             .metric
                             .distance(&self.db.points.row(i), &self.db.points.row(j));
+                        if self.alpha != A::one() {
+                            mreach /= self.alpha;
+                        }
                         if self.core_distances[j] > mreach {
                             mreach = self.core_distances[j];
                         }
