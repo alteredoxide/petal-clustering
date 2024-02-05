@@ -214,7 +214,7 @@ where
         let sorted_mst = Array1::from_vec(mst);
         let labeled = label(sorted_mst);
         let condensed = Array1::from_vec(condense_mst(labeled.view(), self.min_cluster_size));
-        let clusters = find_clusters(&condensed.view());
+        let clusters = find_clusters(&condensed.view(), &self.eps);
         if self.store_condensed {
             self.condensed_tree = Some(condensed)
         }
@@ -473,8 +473,25 @@ where
     )
 }
 
+fn get_parent_child_distance<A: Float + AddAssign + Sub + TryFrom<u32>>(
+    condensed_tree: &ArrayView1<(usize, usize, A, usize)>,
+    parent: usize,
+    child: usize,
+) -> Option<A>
+where
+    <A as TryFrom<u32>>::Error: Debug,
+{
+    for (p, c, distance, _) in condensed_tree.iter() {
+        if parent == *p && child == *c {
+            return Some(*distance);
+        }
+    }
+    None
+}
+
 fn find_clusters<A: Float + AddAssign + Sub + TryFrom<u32>>(
     condensed_tree: &ArrayView1<(usize, usize, A, usize)>,
+    epsilon: &A,
 ) -> (HashMap<usize, Vec<usize>>, Vec<usize>)
 where
     <A as TryFrom<u32>>::Error: Debug,
@@ -492,13 +509,25 @@ where
 
     let mut clusters: HashSet<_> = stability.keys().copied().collect();
     for node in nodes {
+        let mut should_merge = false;
         let subtree_stability = tree.iter().fold(A::zero(), |acc, (p, c)| {
             if *p == node {
+                let distance = get_parent_child_distance(condensed_tree, *p, *c);
+                match distance {
+                    Some(d) => if &d <= epsilon {
+                        should_merge = true;
+                    },
+                    None => println!("no distance found for parent: {} and child: {}", p, c),
+                }
                 acc + *stability.get(c).expect("corruptted stability dictionary")
             } else {
                 acc
             }
         });
+
+        if should_merge {
+            stability.entry(node).and_modify(|v| *v = subtree_stability.max(*v));
+        }
 
         stability.entry(node).and_modify(|v| {
             if *v < subtree_stability {
@@ -1102,7 +1131,7 @@ mod test {
             min_samples: 2,
             min_cluster_size: 2,
             metric: Euclidean::default(),
-            boruvka: false,
+            boruvka: true,
             ..Default::default()
         };
         let (clusters, outliers) = hdbscan.fit(&data);
