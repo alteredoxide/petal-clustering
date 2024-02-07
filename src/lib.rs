@@ -3,7 +3,7 @@ mod hdbscan;
 mod optics;
 
 pub use dbscan::Dbscan;
-pub use hdbscan::{HDbscan, HDbscanError};
+pub use hdbscan::{ClusterSelection, HDbscan, HDbscanError};
 pub use optics::Optics;
 
 /// An interface to train a model.
