@@ -32,12 +32,20 @@ impl std::fmt::Display for HDbscanError {
 }
 
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub enum ClusterSelection {
+    /// Excess of Mass (EOM) method tends to select fewer, larger clusters.
+    Eom,
+    /// Tends to select a greater number of smaller, more granular clusters.
+    Leaf,
+}
+
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HDbscan<A, M> {
     /// The radius of a neighborhood.
     pub eps: A,
     pub alpha: A,
-
     /// The minimum number of points required to form a dense region.
     pub min_samples: usize,
     pub min_cluster_size: usize,
@@ -45,6 +53,8 @@ pub struct HDbscan<A, M> {
     pub boruvka: bool,
     pub store_condensed: bool,
     pub condensed_tree: Option<Array1<(usize, usize, A, usize)>>,
+    pub allow_single_cluster: Option<bool>,
+    pub cluster_selection_method: ClusterSelection,
 }
 
 
@@ -158,7 +168,7 @@ where
     #[must_use]
     fn default() -> Self {
         Self {
-            eps: A::from(0.5_f32).expect("valid float"),
+            eps: A::zero(),
             alpha: A::one(),
             min_samples: 15,
             min_cluster_size: 15,
@@ -166,13 +176,15 @@ where
             boruvka: true,
             store_condensed: false,
             condensed_tree: None,
+            allow_single_cluster: None,
+            cluster_selection_method: ClusterSelection::Eom,
         }
     }
 }
 
 impl<S, A, M> Fit<ArrayBase<S, Ix2>, (HashMap<usize, Vec<usize>>, Vec<usize>)> for HDbscan<A, M>
 where
-    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    A: Debug + AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
     <A as std::convert::TryFrom<u32>>::Error: Debug,
     S: Data<Elem = A>,
     M: Metric<A> + Clone + Sync + Send,
@@ -215,7 +227,7 @@ where
         let sorted_mst = Array1::from_vec(mst);
         let labeled = label(sorted_mst);
         let condensed = Array1::from_vec(condense_mst(labeled.view(), self.min_cluster_size));
-        let clusters = find_clusters(&condensed.view(), &self.eps);
+        let clusters = find_clusters(condensed.view(), &self.eps, self.allow_single_cluster);
         if self.store_condensed {
             self.condensed_tree = Some(condensed)
         }
@@ -440,7 +452,7 @@ fn condense_mst<A: Float + Div>(
 }
 
 fn get_stability<A: Float + AddAssign + Sub + TryFrom<u32>>(
-    condensed_tree: &ArrayView1<(usize, usize, A, usize)>,
+    condensed_tree: ArrayView1<(usize, usize, A, usize)>,
 ) -> HashMap<usize, A>
 where
     <A as TryFrom<u32>>::Error: Debug,
@@ -490,9 +502,70 @@ where
     None
 }
 
-fn find_clusters<A: Float + AddAssign + Sub + TryFrom<u32>>(
-    condensed_tree: &ArrayView1<(usize, usize, A, usize)>,
+fn traverse_upwards<A: Float + AddAssign + Sub + TryFrom<u32>>(
+    cluster_tree: ArrayView1<(usize, usize, A, usize)>,
+    leaf: usize,
     epsilon: &A,
+    allow_single_cluster: Option<bool>,
+) -> usize
+where
+    <A as TryFrom<u32>>::Error: Debug,
+{
+    let root = cluster_tree.iter().map(|v| v.0).min().expect("no root found");
+    let parent = cluster_tree.iter().find(|v| v.1 == leaf).expect("no parent found");
+    if parent.0 == root {
+        match allow_single_cluster {
+            Some(true) => return root,
+            _ => return leaf,
+        }
+    }
+    let parent_lambda = parent.2;
+    let parent_eps = A::one() / parent_lambda;
+    if &parent_eps > epsilon {
+        return parent.0;
+    }
+    traverse_upwards(cluster_tree, parent.0, epsilon, allow_single_cluster)
+}
+
+fn epsilon_search<A: Float + AddAssign + Sub + TryFrom<u32>>(
+    leaves: HashSet<usize>,
+    cluster_tree: ArrayView1<(usize, usize, A, usize)>,
+    epsilon: &A,
+    allow_single_cluster: Option<bool>,
+) -> HashSet<usize>
+where
+    <A as TryFrom<u32>>::Error: Debug,
+{
+    let mut selected_clusters = HashSet::new();
+    let mut processed = HashSet::new();
+    let tree_vec = cluster_tree.iter().map(|v| (v.0, v.1)).collect::<Vec<_>>();
+    for leaf in leaves {
+        let eps = A::one() / cluster_tree.iter()
+            .find(|v| v.1 == leaf)
+            .expect("no parent found").2;
+        if &eps < epsilon {
+            if !processed.contains(&leaf) {
+                let cluster = traverse_upwards(cluster_tree, leaf, epsilon, allow_single_cluster);
+                selected_clusters.insert(cluster);
+                processed.insert(leaf);
+                // remove all leaves that are in the same cluster
+                for sub_node in bfs_mst(cluster_tree, cluster) {
+                    if sub_node != cluster {
+                        processed.insert(sub_node);
+                    }
+                }
+            } else {
+                selected_clusters.insert(leaf);
+            }
+        }
+    }
+    selected_clusters
+}
+
+fn find_clusters<A: Debug + Float + AddAssign + Sub + TryFrom<u32>>(
+    condensed_tree: ArrayView1<(usize, usize, A, usize)>,
+    epsilon: &A,
+    allow_single_cluster: Option<bool>,
 ) -> (HashMap<usize, Vec<usize>>, Vec<usize>)
 where
     <A as TryFrom<u32>>::Error: Debug,
@@ -501,7 +574,11 @@ where
     let mut nodes: Vec<_> = stability.keys().copied().collect();
     nodes.sort_unstable();
     nodes.reverse();
-    nodes.remove(nodes.len() - 1);
+    match allow_single_cluster {
+        Some(true) => {},
+        // remove root otherwise
+        _ => { nodes.remove(nodes.len() - 1); },
+    }
 
     let tree: Vec<_> = condensed_tree
         .iter()
@@ -510,25 +587,13 @@ where
 
     let mut clusters: HashSet<_> = stability.keys().copied().collect();
     for node in nodes {
-        let mut should_merge = false;
         let subtree_stability = tree.iter().fold(A::zero(), |acc, (p, c)| {
             if *p == node {
-                let distance = get_parent_child_distance(condensed_tree, *p, *c);
-                match distance {
-                    Some(d) => if &d <= epsilon {
-                        should_merge = true;
-                    },
-                    None => println!("no distance found for parent: {} and child: {}", p, c),
-                }
                 acc + *stability.get(c).expect("corruptted stability dictionary")
             } else {
                 acc
             }
         });
-
-        if should_merge {
-            stability.entry(node).and_modify(|v| *v = subtree_stability.max(*v));
-        }
 
         stability.entry(node).and_modify(|v| {
             if *v < subtree_stability {
@@ -543,6 +608,22 @@ where
                 }
             }
         });
+    }
+
+    if epsilon != &A::zero() && !tree.is_empty() {
+        let root = tree.iter().map(|v| v.0).min().expect("no root found");
+        let allow_single_cluster = match allow_single_cluster {
+            Some(v) => v,
+            None => false,
+        };
+        if !(clusters.len() == 1 && clusters.contains(&root) && allow_single_cluster) {
+            clusters = epsilon_search(
+                clusters,
+                condensed_tree,
+                epsilon,
+                Some(allow_single_cluster)
+            );
+        }
     }
 
     let mut clusters: Vec<_> = clusters.into_iter().collect();
@@ -1379,7 +1460,7 @@ mod test {
             (7, 0, 1. / 6., 1),
             (7, 3, 1. / 6., 1),
         ]);
-        let stability_map = super::get_stability(&condensed.view());
+        let stability_map = super::get_stability(condensed.view());
         let mut answer = HashMap::new();
         answer.insert(7, 1. / 9. + 3. / 7. + 3. / 6.);
         assert_eq!(stability_map, answer);
