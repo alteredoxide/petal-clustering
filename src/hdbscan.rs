@@ -1,4 +1,4 @@
-use ndarray::{Array1, ArrayBase, ArrayView1, ArrayView2, Data, Ix2};
+use ndarray::{Array1, ArrayBase, ArrayView1, ArrayView2, Data, Ix2, Axis};
 use num_traits::{Float, FromPrimitive};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -144,6 +144,7 @@ where
         Ok(out)
     }
 
+    /// Returns a vector of all leaf nodes for a specified cluster id.
     fn recurse_leaf_dfs(&self, cluster_id: usize)
         -> Result<Vec<usize>, HDbscanError>
     {
@@ -180,6 +181,18 @@ where
             cluster_selection_method: ClusterSelection::Eom,
         }
     }
+}
+
+fn relabel_clusters(
+    clusters: HashMap<usize, Vec<usize>>,
+) -> HashMap<usize, Vec<usize>> {
+    let mut sorted_clusters = clusters.into_iter().collect::<Vec<_>>();
+    sorted_clusters.sort_unstable_by_key(|v| v.0);
+    sorted_clusters
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, cluster))| (i, cluster))
+        .collect()
 }
 
 impl<S, A, M> Fit<ArrayBase<S, Ix2>, (HashMap<usize, Vec<usize>>, Vec<usize>)> for HDbscan<A, M>
@@ -226,12 +239,17 @@ where
         mst.sort_unstable_by(|a, b| a.2.partial_cmp(&(b.2)).expect("invalid distance"));
         let sorted_mst = Array1::from_vec(mst);
         let labeled = label(sorted_mst);
-        let condensed = Array1::from_vec(condense_mst(labeled.view(), self.min_cluster_size));
-        let clusters = find_clusters(condensed.view(), &self.eps, self.allow_single_cluster);
+        let condensed = Array1::from_vec(condense_mst(labeled.iter().collect(), self.min_cluster_size));
+        let (clusters, outliers) = find_clusters(
+            condensed.view(),
+            &self.eps,
+            self.cluster_selection_method,
+            self.allow_single_cluster
+        );
         if self.store_condensed {
             self.condensed_tree = Some(condensed)
         }
-        clusters
+        (relabel_clusters(clusters), outliers)
     }
 }
 
@@ -239,26 +257,18 @@ where
 /// depth-first-search to gather and return all leaf node ids.
 fn recurse_leaf_dfs<A>(
     condensed_tree: &Array1<&(usize, usize, A, usize)>,
-    cluster_id: usize
+    current_node: usize
 ) -> Vec<usize>
     where
         A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
 {
-    //let children = self.condensed_tree.outer_iter().find(|&v| v.0 == &cluster_id);
-    let children: Vec<usize> = condensed_tree
+    let children = condensed_tree
         .iter()
-        .filter_map(|&v| {
-            match v.0 == cluster_id {
-                false => None,
-                true => Some(v.1)
-            }
-        })
-        .collect();
-
+        .filter_map(|v| if v.0 == current_node { Some(v.1) } else { None })
+        .collect::<Vec<_>>();
     if children.is_empty() {
-        return vec![cluster_id]
-    }
-
+        return vec![current_node];
+    } 
     let out = children.into_iter()
         .fold(vec![], |mut nodes, child| {
             nodes.extend(recurse_leaf_dfs(condensed_tree, child));
@@ -365,7 +375,7 @@ fn label<A: Float>(mst: Array1<(usize, usize, A)>) -> Array1<(usize, usize, A, u
 }
 
 fn condense_mst<A: Float + Div>(
-    mst: ArrayView1<(usize, usize, A, usize)>,
+    mst: Array1<&(usize, usize, A, usize)>,
     min_cluster_size: usize,
 ) -> Vec<(usize, usize, A, usize)> {
     let root = mst.len() * 2;
@@ -377,7 +387,7 @@ fn condense_mst<A: Float + Div>(
     let mut ignore = vec![false; root + 1];
     let mut result = Vec::new();
 
-    let bsf = bfs_mst(mst, root);
+    let bsf = bfs_mst(&mst, root);
     for node in bsf {
         if node < n {
             continue;
@@ -422,7 +432,7 @@ fn condense_mst<A: Float + Div>(
             }
             (true, false) => {
                 relabel[left] = relabel[node];
-                for child in bfs_mst(mst, right) {
+                for child in bfs_mst(&mst, right) {
                     if child < n {
                         result.push((unsafe { relabel[node].assume_init() }, child, lambda, 1));
                     }
@@ -431,7 +441,7 @@ fn condense_mst<A: Float + Div>(
             }
             (false, true) => {
                 relabel[right] = relabel[node];
-                for child in bfs_mst(mst, left) {
+                for child in bfs_mst(&mst, left) {
                     if child < n {
                         result.push((unsafe { relabel[node].assume_init() }, child, lambda, 1));
                     }
@@ -439,7 +449,7 @@ fn condense_mst<A: Float + Div>(
                 }
             }
             (false, false) => {
-                for child in bfs_mst(mst, node).into_iter().skip(1) {
+                for child in bfs_mst(&mst, node).into_iter().skip(1) {
                     if child < n {
                         result.push((unsafe { relabel[node].assume_init() }, child, lambda, 1));
                     }
@@ -503,7 +513,7 @@ where
 }
 
 fn traverse_upwards<A: Float + AddAssign + Sub + TryFrom<u32>>(
-    cluster_tree: ArrayView1<(usize, usize, A, usize)>,
+    cluster_tree: &Array1<&(usize, usize, A, usize)>,
     leaf: usize,
     epsilon: &A,
     allow_single_cluster: Option<bool>,
@@ -529,7 +539,7 @@ where
 
 fn epsilon_search<A: Float + AddAssign + Sub + TryFrom<u32>>(
     leaves: HashSet<usize>,
-    cluster_tree: ArrayView1<(usize, usize, A, usize)>,
+    cluster_tree: &Array1<&(usize, usize, A, usize)>,
     epsilon: &A,
     allow_single_cluster: Option<bool>,
 ) -> HashSet<usize>
@@ -549,7 +559,7 @@ where
                 selected_clusters.insert(cluster);
                 processed.insert(leaf);
                 // remove all leaves that are in the same cluster
-                for sub_node in bfs_mst(cluster_tree, cluster) {
+                for sub_node in bfs_mst(&cluster_tree, cluster) {
                     if sub_node != cluster {
                         processed.insert(sub_node);
                     }
@@ -562,12 +572,26 @@ where
     selected_clusters
 }
 
-fn find_clusters<A: Debug + Float + AddAssign + Sub + TryFrom<u32>>(
+fn get_cluster_tree_leaves<A>(cluster_tree: &Array1<&(usize, usize, A, usize)>)
+    -> Vec<usize>
+where
+    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+{
+    if cluster_tree.is_empty() {
+        return vec![];
+    }
+    let root = cluster_tree.iter().map(|v| v.0).min().expect("no root found");
+    return recurse_leaf_dfs(&cluster_tree, root)
+}
+
+fn find_clusters<A>(
     condensed_tree: ArrayView1<(usize, usize, A, usize)>,
     epsilon: &A,
+    cluster_selection_method: ClusterSelection,
     allow_single_cluster: Option<bool>,
 ) -> (HashMap<usize, Vec<usize>>, Vec<usize>)
 where
+    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
     <A as TryFrom<u32>>::Error: Debug,
 {
     let mut stability = get_stability(condensed_tree);
@@ -586,43 +610,70 @@ where
         .collect();
 
     let mut clusters: HashSet<_> = stability.keys().copied().collect();
-    for node in nodes {
-        let subtree_stability = tree.iter().fold(A::zero(), |acc, (p, c)| {
-            if *p == node {
-                acc + *stability.get(c).expect("corruptted stability dictionary")
-            } else {
-                acc
-            }
-        });
 
-        stability.entry(node).and_modify(|v| {
-            if *v < subtree_stability {
-                clusters.remove(&node);
-                *v = subtree_stability;
-            } else {
-                let bfs = bfs_tree(&tree, node);
-                for child in bfs {
-                    if child != node {
-                        clusters.remove(&child);
+    match cluster_selection_method {
+        ClusterSelection::Eom => {
+            for node in nodes {
+                let subtree_stability = tree.iter().fold(A::zero(), |acc, (p, c)| {
+                    if *p == node {
+                        acc + *stability.get(c).expect("corruptted stability dictionary")
+                    } else {
+                        acc
                     }
+                });
+
+                stability.entry(node).and_modify(|v| {
+                    if *v < subtree_stability {
+                        clusters.remove(&node);
+                        *v = subtree_stability;
+                    } else {
+                        let bfs = bfs_tree(&tree, node);
+                        for child in bfs {
+                            if child != node {
+                                clusters.remove(&child);
+                            }
+                        }
+                    }
+                });
+            }
+
+            if epsilon != &A::zero() && !tree.is_empty() {
+                let root = tree.iter().map(|v| v.0).min().expect("no root found");
+                let allow_single_cluster = match allow_single_cluster {
+                    Some(v) => v,
+                    None => false,
+                };
+                if !(clusters.len() == 1 && clusters.contains(&root) && allow_single_cluster) {
+                    clusters = epsilon_search(
+                        clusters,
+                        &condensed_tree.iter().collect(),
+                        epsilon,
+                        Some(allow_single_cluster)
+                    );
                 }
             }
-        });
-    }
-
-    if epsilon != &A::zero() && !tree.is_empty() {
-        let root = tree.iter().map(|v| v.0).min().expect("no root found");
-        let allow_single_cluster = match allow_single_cluster {
-            Some(v) => v,
-            None => false,
-        };
-        if !(clusters.len() == 1 && clusters.contains(&root) && allow_single_cluster) {
-            clusters = epsilon_search(
-                clusters,
-                condensed_tree,
-                epsilon,
-                Some(allow_single_cluster)
-            );
+        },
+        ClusterSelection::Leaf => {
+            let cluster_tree: Array1<&(usize, usize, A, usize)> = condensed_tree
+                .iter()
+                .filter(|&v| v.3 > 1)
+                .collect();
+            let leaves = get_cluster_tree_leaves(&cluster_tree);
+            if leaves.is_empty() {
+                clusters.clear();
+                let root = condensed_tree.iter().map(|v| v.0).min().expect("no root found");
+                clusters.insert(root);
+            }
+            if epsilon != &A::zero() {
+                clusters = epsilon_search(
+                    leaves.into_iter().collect(),
+                    &cluster_tree,
+                    epsilon,
+                    allow_single_cluster
+                );
+            } else {
+                clusters = leaves.into_iter().collect();
+            }
         }
     }
 
@@ -685,7 +736,7 @@ fn bfs_tree(tree: &[(usize, usize)], root: usize) -> Vec<usize> {
     result
 }
 
-fn bfs_mst<A: Float>(mst: ArrayView1<(usize, usize, A, usize)>, start: usize) -> Vec<usize> {
+fn bfs_mst<A: Float>(mst: &Array1<&(usize, usize, A, usize)>, start: usize) -> Vec<usize> {
     let n = mst.len() + 1;
 
     let mut to_process = vec![start];
@@ -1200,6 +1251,8 @@ impl Components {
 }
 
 mod test {
+    use std::collections::HashMap;
+
 
     #[test]
     fn hdbscan() {
@@ -1230,6 +1283,60 @@ mod test {
             outliers.len(),
             data.nrows() - clusters.values().fold(0, |acc, v| acc + v.len())
         );
+    }
+
+    #[test]
+    fn hdbscan_leaf() {
+        use crate::Fit;
+        use ndarray::array;
+        use petal_neighbors::distance::Euclidean;
+
+        let data = array![
+            [ 0.06773077,  9.08570996],
+            [ 3.49302242, -7.87654764],
+            [-2.43203197,  7.46577602],
+            [-0.77757877,  8.73031386],
+            [-2.47912623,  8.7266127 ],
+            [ 2.15570162, -7.68741574],
+            [ 4.4471007 , -5.41556534],
+            [ 4.21618717, -6.4725295 ],
+            [-1.31953417,  9.76281499],
+            [ 1.90393137, -6.8904547 ],
+            [ 4.89948794, -6.74059989]
+        ];
+        let expected_eom = HashMap::from([
+            (0, vec![0, 2, 3, 4, 8]),
+            (1, vec![1, 5, 6, 7, 9, 10]),
+        ]);
+        let expected_leaf = HashMap::from([
+            (0, vec![0, 2, 3, 4, 8]),
+            (1, vec![1, 5]),
+            (2, vec![6, 7, 10]),
+        ]);
+        let mut hdbscan_eom = super::HDbscan {
+            eps: 0.,
+            alpha: 1.,
+            min_samples: 2,
+            min_cluster_size: 2,
+            metric: Euclidean::default(),
+            boruvka: true,
+            cluster_selection_method: super::ClusterSelection::Eom,
+            ..Default::default()
+        };
+        let mut hdbscan_leaf = super::HDbscan {
+            eps: 0.,
+            alpha: 1.,
+            min_samples: 2,
+            min_cluster_size: 2,
+            metric: Euclidean::default(),
+            boruvka: true,
+            cluster_selection_method: super::ClusterSelection::Leaf,
+            ..Default::default()
+        };
+        let (clusters_eom, _) = hdbscan_eom.fit(&data);
+        let (clusters_leaf, _) = hdbscan_leaf.fit(&data);
+        assert_eq!(clusters_eom, expected_eom);
+        assert_eq!(clusters_leaf, expected_leaf);
     }
 
     #[test]
@@ -1408,13 +1515,14 @@ mod test {
             (11, 6, 9., 7),
         ]);
         let root = mst.len() * 2;
-        let bfs = super::bfs_mst(mst.view(), root);
+        let mst_ref = mst.iter().collect();
+        let bfs = super::bfs_mst(&mst_ref, root);
         assert_eq!(bfs, [12, 11, 6, 10, 8, 9, 1, 4, 2, 7, 5, 0, 3]);
 
-        let bfs = super::bfs_mst(mst.view(), 11);
+        let bfs = super::bfs_mst(&mst_ref, 11);
         assert_eq!(bfs, vec![11, 10, 8, 9, 1, 4, 2, 7, 5, 0, 3]);
 
-        let bfs = super::bfs_mst(mst.view(), 8);
+        let bfs = super::bfs_mst(&mst_ref, 8);
         assert_eq!(bfs, vec![8, 4, 2]);
     }
 
@@ -1431,7 +1539,7 @@ mod test {
             (11, 6, 9., 7),
         ]);
 
-        let condensed_mst = super::condense_mst(mst.view(), 3);
+        let condensed_mst = super::condense_mst(mst.iter().collect(), 3);
         assert_eq!(
             condensed_mst,
             vec![
