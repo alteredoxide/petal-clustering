@@ -185,7 +185,7 @@ where
         let db = BallTree::new(input.view(), self.metric.clone()).expect("non-empty array");
 
         let mut mst = if self.boruvka {
-            let boruvka = Boruvka::new(db, self.min_samples, self.alpha);
+            let boruvka = Boruvka::new(db, self.min_samples, self.alpha, self.eps);
             boruvka.min_spanning_tree().into_raw_vec()
         } else {
             let core_distances = Array1::from_vec(
@@ -193,7 +193,8 @@ where
                     .rows()
                     .into_iter()
                     .map(|r| {
-                        db.query(&r, self.min_samples)
+                        // plus one to account for the point itself
+                        db.query(&r, self.min_samples + 1)
                             .1
                             .last()
                             .copied()
@@ -743,6 +744,7 @@ where
     db: BallTree<'a, A, M>,
     min_samples: usize,
     alpha: A,
+    epsilon: A,
     candidates: Candidates<A>,
     components: Components,
     core_distances: Array1<A>,
@@ -753,19 +755,21 @@ where
 #[allow(dead_code)]
 impl<'a, A, M> Boruvka<'a, A, M>
 where
-    A: Float + AddAssign + DivAssign + FromPrimitive + Sync + Send,
+    A: Debug + Float + AddAssign + DivAssign + FromPrimitive + Sync + Send,
     M: Metric<A> + Sync + Send,
 {
-    fn new(db: BallTree<'a, A, M>, min_samples: usize, alpha: A) -> Self {
+    fn new(db: BallTree<'a, A, M>, min_samples: usize, alpha: A, epsilon: A) -> Self {
         let mut candidates = Candidates::new(db.points.nrows());
         let components = Components::new(db.nodes.len(), db.points.nrows());
         let bounds = vec![A::max_value(); db.nodes.len()];
-        let core_distances = compute_core_distances(&db, min_samples, &mut candidates);
+        // plus one on `min_samples` to account for the point itself
+        let core_distances = compute_core_distances(&db, min_samples + 1, &mut candidates);
         let mst = Vec::with_capacity(db.points.nrows() - 1);
         Boruvka {
             db,
             min_samples,
             alpha,
+            epsilon,
             candidates,
             components,
             core_distances,
@@ -1131,9 +1135,9 @@ mod test {
             [-2.2, 3.1],
         ];
         let mut hdbscan = super::HDbscan {
-            eps: 0.5,
+            eps: 0.,
             alpha: 1.,
-            min_samples: 2,
+            min_samples: 1,
             min_cluster_size: 2,
             metric: Euclidean::default(),
             boruvka: true,
@@ -1219,7 +1223,7 @@ mod test {
         ]);
 
         let db = BallTree::new(input, Euclidean::default()).unwrap();
-        let boruvka = super::Boruvka::new(db, 2);
+        let boruvka = super::Boruvka::new(db, 1, 1., 0.);
         let mst = boruvka.min_spanning_tree();
 
         let answer = arr1(&[
