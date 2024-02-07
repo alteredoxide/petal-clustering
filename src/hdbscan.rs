@@ -53,6 +53,8 @@ pub struct HDbscan<A, M> {
     pub boruvka: bool,
     pub store_condensed: bool,
     pub condensed_tree: Option<Array1<(usize, usize, A, usize)>>,
+    /// A mapping of the output (contiguous) cluster id to the original cluster id.
+    pub cluster_relabels: HashMap<usize, usize>,
     pub allow_single_cluster: Option<bool>,
     pub cluster_selection_method: ClusterSelection,
 }
@@ -112,6 +114,10 @@ where
     pub fn exemplars(&self, cluster_id: usize)
         -> Result<Vec<usize>, HDbscanError>
     {
+        let cluster_id = match self.cluster_relabels.get(&cluster_id) {
+            Some(id) => *id,
+            None => return Err(HDbscanError::CondensedTreeNotComputed)
+        };
         if self.condensed_tree.is_none() {
             return Err(HDbscanError::CondensedTreeNotComputed)
         }
@@ -178,6 +184,7 @@ where
             store_condensed: false,
             condensed_tree: None,
             allow_single_cluster: None,
+            cluster_relabels: HashMap::new(),
             cluster_selection_method: ClusterSelection::Eom,
         }
     }
@@ -185,14 +192,19 @@ where
 
 fn relabel_clusters(
     clusters: HashMap<usize, Vec<usize>>,
-) -> HashMap<usize, Vec<usize>> {
+) -> (HashMap<usize, Vec<usize>>, HashMap<usize, usize>) {
+    let mut relabels = HashMap::new();
     let mut sorted_clusters = clusters.into_iter().collect::<Vec<_>>();
     sorted_clusters.sort_unstable_by_key(|v| v.0);
-    sorted_clusters
+    let new_clusters = sorted_clusters
         .into_iter()
         .enumerate()
-        .map(|(i, (id, cluster))| (i, cluster))
-        .collect()
+        .map(|(i, (id, cluster))| {
+            relabels.insert(i, id);
+            (i, cluster)
+        })
+        .collect();
+    (new_clusters, relabels)
 }
 
 impl<S, A, M> Fit<ArrayBase<S, Ix2>, (HashMap<usize, Vec<usize>>, Vec<usize>)> for HDbscan<A, M>
@@ -249,7 +261,9 @@ where
         if self.store_condensed {
             self.condensed_tree = Some(condensed)
         }
-        (relabel_clusters(clusters), outliers)
+        let (new_clusters, cluster_relabels) = relabel_clusters(clusters);
+        self.cluster_relabels = cluster_relabels;
+        (new_clusters, outliers)
     }
 }
 
