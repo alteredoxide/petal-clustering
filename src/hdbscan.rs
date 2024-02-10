@@ -1219,7 +1219,7 @@ mod test {
         ]);
 
         let db = BallTree::new(input, Euclidean::default()).unwrap();
-        let boruvka = super::Boruvka::new(db, 2);
+        let boruvka = super::Boruvka::new(db, 2, 1.0);
         let mst = boruvka.min_spanning_tree();
 
         let answer = arr1(&[
