@@ -101,7 +101,7 @@ where
     ///     ..Default::default()
     /// };
     /// let (clusters, outliers) = hdbscan.fit(&data);
-    /// let exemplars = match hdbscan.exemplars(12) {
+    /// let exemplars = match hdbscan.exemplars(0) {
     ///     Ok(ex) => ex,
     ///     Err(e) => panic!("{}", e)
     /// };
