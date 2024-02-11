@@ -388,13 +388,12 @@ fn label<A: Float>(mst: Array1<(usize, usize, A)>) -> Array1<(usize, usize, A, u
         .collect()
 }
 
-fn condense_mst<A: Float + Div>(
+fn condense_mst<A: Debug + Float + Div>(
     mst: Array1<&(usize, usize, A, usize)>,
     min_cluster_size: usize,
 ) -> Vec<(usize, usize, A, usize)> {
     let root = mst.len() * 2;
     let n = mst.len() + 1;
-
     let mut relabel = Array1::<usize>::uninit(root + 1);
     relabel[root] = MaybeUninit::new(n);
     let mut next_label = n + 1;
@@ -403,10 +402,7 @@ fn condense_mst<A: Float + Div>(
 
     let bsf = bfs_mst(&mst, root);
     for node in bsf {
-        if node < n {
-            continue;
-        }
-        if ignore[node] {
+        if ignore[node] || node < n {
             continue;
         }
         let info = mst[node - n];
@@ -532,7 +528,7 @@ where
     None
 }
 
-fn traverse_upwards<A: Float + AddAssign + Sub + TryFrom<u32>>(
+fn traverse_upwards<A: Debug + Float + AddAssign + Sub + TryFrom<u32>>(
     cluster_tree: &Array1<&(usize, usize, A, usize)>,
     leaf: usize,
     epsilon: &A,
@@ -557,8 +553,8 @@ where
     traverse_upwards(cluster_tree, parent.0, epsilon, allow_single_cluster)
 }
 
-fn epsilon_search<A: Float + AddAssign + Sub + TryFrom<u32>>(
-    leaves: HashSet<usize>,
+fn epsilon_search<A: Debug + Float + AddAssign + Sub + TryFrom<u32>>(
+    leaves: Vec<usize>,
     cluster_tree: &Array1<&(usize, usize, A, usize)>,
     epsilon: &A,
     allow_single_cluster: Option<bool>,
@@ -568,25 +564,28 @@ where
 {
     let mut selected_clusters = HashSet::new();
     let mut processed = HashSet::new();
-    let tree_vec = cluster_tree.iter().map(|v| (v.0, v.1)).collect::<Vec<_>>();
+    //let tree_vec = cluster_tree.iter().map(|v| (v.0, v.1)).collect::<Vec<_>>();
     for leaf in leaves {
-        let eps = A::one() / cluster_tree.iter()
-            .find(|v| v.1 == leaf)
-            .expect("no parent found").2;
+        let lambda = cluster_tree.iter().find(|v| v.1 == leaf).expect("no parent found").2;
+        let eps = A::one() / lambda;
         if &eps < epsilon {
             if !processed.contains(&leaf) {
-                let cluster = traverse_upwards(cluster_tree, leaf, epsilon, allow_single_cluster);
+                let cluster = traverse_upwards(
+                    cluster_tree,
+                    leaf,
+                    epsilon,
+                    allow_single_cluster
+                );
                 selected_clusters.insert(cluster);
-                processed.insert(leaf);
                 // remove all leaves that are in the same cluster
-                for sub_node in bfs_mst(&cluster_tree, cluster) {
+                for sub_node in bfs_from_cluster_tree(&cluster_tree, cluster) {
                     if sub_node != cluster {
                         processed.insert(sub_node);
                     }
                 }
-            } else {
-                selected_clusters.insert(leaf);
             }
+        } else {
+            selected_clusters.insert(leaf);
         }
     }
     selected_clusters
@@ -611,7 +610,7 @@ fn find_clusters<A>(
     allow_single_cluster: Option<bool>,
 ) -> (HashMap<usize, Vec<usize>>, Vec<usize>)
 where
-    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    A: Debug + AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
     <A as TryFrom<u32>>::Error: Debug,
 {
     let mut stability = get_stability(condensed_tree);
@@ -659,16 +658,21 @@ where
 
             if epsilon != &A::zero() && !tree.is_empty() {
                 let root = tree.iter().map(|v| v.0).min().expect("no root found");
-                let allow_single_cluster = match allow_single_cluster {
-                    Some(v) => v,
-                    None => false,
-                };
-                if !(clusters.len() == 1 && clusters.contains(&root) && allow_single_cluster) {
+                let cluster_tree: Array1<&(usize, usize, A, usize)> = condensed_tree
+                    .iter()
+                    .filter(|&v| v.3 > 1)
+                    .collect();
+                let leaves = get_cluster_tree_leaves(&cluster_tree);
+                if !(
+                    clusters.len() == 1
+                    && clusters.contains(&root)
+                    && allow_single_cluster.unwrap_or(false)
+                ) {
                     clusters = epsilon_search(
-                        clusters,
+                        leaves,
                         &condensed_tree.iter().collect(),
                         epsilon,
-                        Some(allow_single_cluster)
+                        allow_single_cluster
                     );
                 }
             }
@@ -686,7 +690,7 @@ where
             }
             if epsilon != &A::zero() {
                 clusters = epsilon_search(
-                    leaves.into_iter().collect(),
+                    leaves,
                     &cluster_tree,
                     epsilon,
                     allow_single_cluster
@@ -756,7 +760,7 @@ fn bfs_tree(tree: &[(usize, usize)], root: usize) -> Vec<usize> {
     result
 }
 
-fn bfs_mst<A: Float>(mst: &Array1<&(usize, usize, A, usize)>, start: usize) -> Vec<usize> {
+fn bfs_mst<A: Debug + Float>(mst: &Array1<&(usize, usize, A, usize)>, start: usize) -> Vec<usize> {
     let n = mst.len() + 1;
 
     let mut to_process = vec![start];
@@ -774,6 +778,28 @@ fn bfs_mst<A: Float>(mst: &Array1<&(usize, usize, A, usize)>, start: usize) -> V
                 }
             })
             .flatten()
+            .collect();
+    }
+    result
+}
+
+fn bfs_from_cluster_tree<A: Debug + Float>(
+    cluster_tree: &Array1<&(usize, usize, A, usize)>,
+    start: usize,
+) -> Vec<usize> {
+    let mut result = vec![];
+    let mut to_process = vec![start];
+
+    while !to_process.is_empty() {
+        result.extend_from_slice(to_process.as_slice());
+        to_process = cluster_tree.iter()
+            .filter_map(|v| {
+                if to_process.contains(&v.0) {
+                    Some(v.1)
+                } else {
+                    None
+                }
+            })
             .collect();
     }
     result
@@ -1289,7 +1315,7 @@ mod test {
             [-2.2, 3.1],
         ];
         let mut hdbscan = super::HDbscan {
-            eps: 0.,
+            eps: 0.0,
             alpha: 1.,
             min_samples: 1,
             min_cluster_size: 2,
@@ -1333,18 +1359,20 @@ mod test {
             (1, vec![1, 5]),
             (2, vec![6, 7, 10]),
         ]);
+         
         let mut hdbscan_eom = super::HDbscan {
-            eps: 0.,
+            eps: 0.0,
             alpha: 1.,
             min_samples: 2,
             min_cluster_size: 2,
             metric: Euclidean::default(),
             boruvka: true,
             cluster_selection_method: super::ClusterSelection::Eom,
+            allow_single_cluster: Some(true),
             ..Default::default()
         };
         let mut hdbscan_leaf = super::HDbscan {
-            eps: 0.,
+            eps: 0.5,
             alpha: 1.,
             min_samples: 2,
             min_cluster_size: 2,
@@ -1547,6 +1575,30 @@ mod test {
     }
 
     #[test]
+    fn bfs_from_cluster_tree() {
+        use ndarray::arr1;
+        let mst = arr1(&[
+            (0, 3, 5., 2),
+            (4, 2, 5., 2),
+            (7, 5, 6., 3),
+            (9, 1, 7., 4),
+            (10, 8, 7., 6),
+            (11, 6, 9., 7),
+        ]);
+        let root = mst.len() * 2;
+        let mst_ref = mst.iter().collect();
+
+        let bfs = super::bfs_from_cluster_tree(&mst_ref, 12);
+        assert_eq!(bfs, [12]);
+
+        let bfs = super::bfs_from_cluster_tree(&mst_ref, 11);
+        assert_eq!(bfs, vec![11, 6]);
+
+        let bfs = super::bfs_from_cluster_tree(&mst_ref, 8);
+        assert_eq!(bfs, vec![8]);
+    }
+
+    #[test]
     fn condense_mst() {
         use ndarray::arr1;
 
@@ -1567,9 +1619,9 @@ mod test {
                 (7, 4, 1. / 7., 1),
                 (7, 2, 1. / 7., 1),
                 (7, 1, 1. / 7., 1),
-                (7, 5, 1. / 6., 1),
                 (7, 0, 1. / 6., 1),
-                (7, 3, 1. / 6., 1)
+                (7, 3, 1. / 6., 1),
+                (7, 5, 1. / 6., 1),
             ],
         );
     }
