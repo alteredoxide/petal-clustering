@@ -463,7 +463,13 @@ fn condense_mst<A: Float + Div>(
                 }
             }
             (false, false) => {
-                for child in bfs_mst(&mst, node).into_iter().skip(1) {
+                for child in bfs_mst(&mst, left).into_iter() {
+                    if child < n {
+                        result.push((unsafe { relabel[node].assume_init() }, child, lambda, 1));
+                    }
+                    ignore[child] = true;
+                }
+                for child in bfs_mst(&mst, right).into_iter() {
                     if child < n {
                         result.push((unsafe { relabel[node].assume_init() }, child, lambda, 1));
                     }
