@@ -114,7 +114,7 @@ where
     pub fn exemplars(&self, cluster_id: usize)
         -> Result<Vec<usize>, HDbscanError>
     {
-        let cluster_id = match self.cluster_relabels.get(&cluster_id) {
+        let orig_cluster_id = match self.cluster_relabels.get(&cluster_id) {
             Some(id) => *id,
             None => return Err(HDbscanError::CondensedTreeNotComputed)
         };
@@ -122,8 +122,14 @@ where
             return Err(HDbscanError::CondensedTreeNotComputed)
         }
         let mut out = Vec::new();
-        let leaves = match self.recurse_leaf_dfs(cluster_id) {
+        let skip_nodes = &self.cluster_relabels
+            .values()
+            .filter(|&&v| v != orig_cluster_id)
+            .copied()
+            .collect();
+        let leaves = match self.recurse_leaf_dfs_skip(orig_cluster_id, skip_nodes) {
             Err(e) => return Err(e),
+            // do not include any leaf ids that are already a cluster
             Ok(l) => l
         };
         let condensed_tree = self.condensed_tree.as_ref().unwrap();
@@ -140,7 +146,9 @@ where
                 .iter()
                 .filter_map(|&v| {
                     match (v.0 == leaf) && (v.2 == leaf_max_lambda) {
-                        true => Some(v.1),
+                        true => {
+                            Some(v.1)
+                        },
                         false => None,
                     }
                 })
@@ -164,6 +172,23 @@ where
             .filter(|&v| v.3 > 1)
             .collect();
         let leaves = recurse_leaf_dfs(&cluster_tree, cluster_id);
+        Ok(leaves)
+    }
+
+    /// Returns a vector of all leaf nodes for a specified cluster id.
+    fn recurse_leaf_dfs_skip(&self, cluster_id: usize, skip_nodes: &Vec<usize>)
+        -> Result<Vec<usize>, HDbscanError>
+    {
+        if self.condensed_tree.is_none() {
+            return Err(HDbscanError::CondensedTreeNotComputed)
+        }
+        let cluster_tree: Array1<&(usize, usize, A, usize)> = self.condensed_tree
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|&v| v.3 > 1)
+            .collect();
+        let leaves = recurse_leaf_dfs_skip(&cluster_tree, cluster_id, skip_nodes);
         Ok(leaves)
     }
 }
@@ -286,6 +311,39 @@ fn recurse_leaf_dfs<A>(
     let out = children.into_iter()
         .fold(vec![], |mut nodes, child| {
             nodes.extend(recurse_leaf_dfs(condensed_tree, child));
+            nodes
+        });
+    out
+}
+
+/// Given a condensed tree, a starting cluster id and a vec of nodes to skip,
+/// use recursive depth-first-search to gather and return all leaf node ids.
+/// Whenever the recursion encounters a node in the skip list, it will not continue to
+/// find leaves from that node, and that node will not be included in the outputs.
+///
+/// This is used during epsilon search to avoid including nodes that have already been
+/// included in a cluster that is a descendant of the current cluster.
+fn recurse_leaf_dfs_skip<A>(
+    condensed_tree: &Array1<&(usize, usize, A, usize)>,
+    current_node: usize,
+    skip_nodes: &Vec<usize>,
+) -> Vec<usize>
+    where
+        A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+{
+    if skip_nodes.contains(&current_node) {
+        return vec![];
+    }
+    let children = condensed_tree
+        .iter()
+        .filter_map(|v| if v.0 == current_node { Some(v.1) } else { None })
+        .collect::<Vec<_>>();
+    if children.is_empty() {
+        return vec![current_node];
+    } 
+    let out = children.into_iter()
+        .fold(vec![], |mut nodes, child| {
+            nodes.extend(recurse_leaf_dfs_skip(condensed_tree, child, skip_nodes));
             nodes
         });
     out
@@ -564,7 +622,6 @@ where
 {
     let mut selected_clusters = HashSet::new();
     let mut processed = HashSet::new();
-    //let tree_vec = cluster_tree.iter().map(|v| (v.0, v.1)).collect::<Vec<_>>();
     for leaf in leaves {
         let lambda = cluster_tree.iter().find(|v| v.1 == leaf).expect("no parent found").2;
         let eps = A::one() / lambda;
