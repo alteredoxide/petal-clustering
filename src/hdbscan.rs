@@ -1,5 +1,5 @@
 use ndarray::{Array1, ArrayBase, ArrayView1, ArrayView2, Data, Ix2, Axis};
-use num_traits::{Float, FromPrimitive};
+use num_traits::{float::FloatCore, FromPrimitive};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -62,7 +62,7 @@ pub struct HDbscan<A, M> {
 
 impl<A, M> HDbscan<A, M>
 where
-    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    A: AddAssign + DivAssign + FloatCore + FromPrimitive + Sync + Send + TryFrom<u32>,
     <A as std::convert::TryFrom<u32>>::Error: Debug,
     M: Metric<A> + Clone + Sync + Send,
 {
@@ -195,7 +195,7 @@ where
 
 impl<A> Default for HDbscan<A, Euclidean>
 where
-    A: Float,
+    A: FloatCore,
 {
     #[must_use]
     fn default() -> Self {
@@ -234,7 +234,7 @@ fn relabel_clusters(
 
 impl<S, A, M> Fit<ArrayBase<S, Ix2>, (HashMap<usize, Vec<usize>>, Vec<usize>)> for HDbscan<A, M>
 where
-    A: Debug + AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    A: Debug + AddAssign + DivAssign + FloatCore + FromPrimitive + Sync + Send + TryFrom<u32>,
     <A as std::convert::TryFrom<u32>>::Error: Debug,
     S: Data<Elem = A>,
     M: Metric<A> + Clone + Sync + Send,
@@ -292,6 +292,7 @@ where
     }
 }
 
+
 /// Given a condensed tree and a starting cluster id, use recursive
 /// depth-first-search to gather and return all leaf node ids.
 fn recurse_leaf_dfs<A>(
@@ -299,7 +300,7 @@ fn recurse_leaf_dfs<A>(
     current_node: usize
 ) -> Vec<usize>
     where
-        A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+        A: AddAssign + DivAssign + FloatCore + FromPrimitive + Sync + Send + TryFrom<u32>,
 {
     let children = condensed_tree
         .iter()
@@ -329,7 +330,7 @@ fn recurse_leaf_dfs_skip<A>(
     skip_nodes: &Vec<usize>,
 ) -> Vec<usize>
     where
-        A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+        A: AddAssign + DivAssign + FloatCore + FromPrimitive + Sync + Send + TryFrom<u32>,
 {
     if skip_nodes.contains(&current_node) {
         return vec![];
@@ -350,7 +351,7 @@ fn recurse_leaf_dfs_skip<A>(
 }
 
 
-fn mst_linkage<A: Float>(
+fn mst_linkage<A: FloatCore>(
     input: ArrayView2<A>,
     metric: &dyn Metric<A>,
     core_distances: ArrayView1<A>,
@@ -434,7 +435,7 @@ fn mst_linkage<A: Float>(
     unsafe { mst.assume_init() }
 }
 
-fn label<A: Float>(mst: Array1<(usize, usize, A)>) -> Array1<(usize, usize, A, usize)> {
+fn label<A: FloatCore>(mst: Array1<(usize, usize, A)>) -> Array1<(usize, usize, A, usize)> {
     let n = mst.len() + 1;
     let mut uf = UnionFind::new(n);
     mst.into_iter()
@@ -446,7 +447,7 @@ fn label<A: Float>(mst: Array1<(usize, usize, A)>) -> Array1<(usize, usize, A, u
         .collect()
 }
 
-fn condense_mst<A: Debug + Float + Div>(
+fn condense_mst<A: Debug + FloatCore + Div>(
     mst: Array1<&(usize, usize, A, usize)>,
     min_cluster_size: usize,
 ) -> Vec<(usize, usize, A, usize)> {
@@ -535,8 +536,8 @@ fn condense_mst<A: Debug + Float + Div>(
     result
 }
 
-fn get_stability<A: Float + AddAssign + Sub + TryFrom<u32>>(
-    condensed_tree: ArrayView1<(usize, usize, A, usize)>,
+fn get_stability<A: FloatCore + AddAssign + Sub + TryFrom<u32>>(
+    condensed_tree: &ArrayView1<(usize, usize, A, usize)>,
 ) -> HashMap<usize, A>
 where
     <A as TryFrom<u32>>::Error: Debug,
@@ -570,7 +571,7 @@ where
     )
 }
 
-fn get_parent_child_distance<A: Float + AddAssign + Sub + TryFrom<u32>>(
+fn get_parent_child_distance<A: FloatCore + AddAssign + Sub + TryFrom<u32>>(
     condensed_tree: &ArrayView1<(usize, usize, A, usize)>,
     parent: usize,
     child: usize,
@@ -586,7 +587,7 @@ where
     None
 }
 
-fn traverse_upwards<A: Debug + Float + AddAssign + Sub + TryFrom<u32>>(
+fn traverse_upwards<A: Debug + FloatCore + AddAssign + Sub + TryFrom<u32>>(
     cluster_tree: &Array1<&(usize, usize, A, usize)>,
     leaf: usize,
     epsilon: &A,
@@ -611,7 +612,7 @@ where
     traverse_upwards(cluster_tree, parent.0, epsilon, allow_single_cluster)
 }
 
-fn epsilon_search<A: Debug + Float + AddAssign + Sub + TryFrom<u32>>(
+fn epsilon_search<A: Debug + FloatCore + AddAssign + Sub + TryFrom<u32>>(
     leaves: Vec<usize>,
     cluster_tree: &Array1<&(usize, usize, A, usize)>,
     epsilon: &A,
@@ -651,7 +652,7 @@ where
 fn get_cluster_tree_leaves<A>(cluster_tree: &Array1<&(usize, usize, A, usize)>)
     -> Vec<usize>
 where
-    A: AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    A: AddAssign + DivAssign + FloatCore + FromPrimitive + Sync + Send + TryFrom<u32>,
 {
     if cluster_tree.is_empty() {
         return vec![];
@@ -667,10 +668,10 @@ fn find_clusters<A>(
     allow_single_cluster: Option<bool>,
 ) -> (HashMap<usize, Vec<usize>>, Vec<usize>)
 where
-    A: Debug + AddAssign + DivAssign + Float + FromPrimitive + Sync + Send + TryFrom<u32>,
+    A: Debug + AddAssign + DivAssign + FloatCore + FromPrimitive + Sync + Send + TryFrom<u32>,
     <A as TryFrom<u32>>::Error: Debug,
 {
-    let mut stability = get_stability(condensed_tree);
+    let mut stability = get_stability(&condensed_tree);
     let mut nodes: Vec<_> = stability.keys().copied().collect();
     nodes.sort_unstable();
     nodes.reverse();
@@ -817,7 +818,7 @@ fn bfs_tree(tree: &[(usize, usize)], root: usize) -> Vec<usize> {
     result
 }
 
-fn bfs_mst<A: Debug + Float>(mst: &Array1<&(usize, usize, A, usize)>, start: usize) -> Vec<usize> {
+fn bfs_mst<A: Debug + FloatCore>(mst: &Array1<&(usize, usize, A, usize)>, start: usize) -> Vec<usize> {
     let n = mst.len() + 1;
 
     let mut to_process = vec![start];
@@ -840,7 +841,7 @@ fn bfs_mst<A: Debug + Float>(mst: &Array1<&(usize, usize, A, usize)>, start: usi
     result
 }
 
-fn bfs_from_cluster_tree<A: Debug + Float>(
+fn bfs_from_cluster_tree<A: Debug + FloatCore>(
     cluster_tree: &Array1<&(usize, usize, A, usize)>,
     start: usize,
 ) -> Vec<usize> {
@@ -973,7 +974,7 @@ impl UnionFind {
 #[allow(dead_code)]
 struct Boruvka<'a, A, M>
 where
-    A: Float,
+    A: FloatCore,
     M: Metric<A>,
 {
     db: BallTree<'a, A, M>,
@@ -990,7 +991,7 @@ where
 #[allow(dead_code)]
 impl<'a, A, M> Boruvka<'a, A, M>
 where
-    A: Debug + Float + AddAssign + DivAssign + FromPrimitive + Sync + Send,
+    A: Debug + FloatCore + AddAssign + DivAssign + FromPrimitive + Sync + Send,
     M: Metric<A> + Sync + Send,
 {
     fn new(db: BallTree<'a, A, M>, min_samples: usize, alpha: A, epsilon: A) -> Self {
@@ -1026,9 +1027,8 @@ where
     fn update_components(&mut self) -> usize {
         let components = self.components.get_current();
         for i in components {
-            let (src, sink, dist) = match self.candidates.get(i) {
-                Some((src, sink, dist)) => (src, sink, dist),
-                None => continue,
+            let Some((src, sink, dist)) = self.candidates.get(i) else {
+                continue;
             };
 
             if self.components.add(src, sink).is_none() {
@@ -1172,11 +1172,11 @@ where
                 let left_bound = self.db.node_distance_lower_bound(reference, left);
                 let right_bound = self.db.node_distance_lower_bound(reference, right);
                 if left_bound < right_bound {
-                    self.traversal(reference, left);
-                    self.traversal(reference, right);
+                    self.traversal(left, reference);
+                    self.traversal(right, reference);
                 } else {
-                    self.traversal(reference, right);
-                    self.traversal(reference, left);
+                    self.traversal(right, reference);
+                    self.traversal(left, reference);
                 }
             }
         }
@@ -1226,7 +1226,7 @@ fn compute_core_distances<A, M>(
     candidates: &mut Candidates<A>,
 ) -> Array1<A>
 where
-    A: AddAssign + DivAssign + FromPrimitive + Float + Sync + Send,
+    A: AddAssign + DivAssign + FromPrimitive + FloatCore + Sync + Send,
     M: Metric<A> + Sync + Send,
 {
     let mut knn_indices = vec![0; db.points.nrows() * min_samples];
@@ -1265,7 +1265,7 @@ struct Candidates<A> {
 }
 
 #[allow(dead_code)]
-impl<A: Float> Candidates<A> {
+impl<A: FloatCore> Candidates<A> {
     fn new(n: usize) -> Self {
         // define max_value as NULL
         let neighbors = vec![u32::max_value(); n];
@@ -1697,7 +1697,7 @@ mod test {
             (7, 0, 1. / 6., 1),
             (7, 3, 1. / 6., 1),
         ]);
-        let stability_map = super::get_stability(condensed.view());
+        let stability_map = super::get_stability(&condensed.view());
         let mut answer = HashMap::new();
         answer.insert(7, 1. / 9. + 3. / 7. + 3. / 6.);
         assert_eq!(stability_map, answer);

@@ -5,6 +5,25 @@ file is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and
 this project adheres to [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2024-02-21
+
+### Changed
+
+- Requires Rust 1.74 or later.
+
+### Fixed
+
+- Corrected the dual-tree traversal order in the `HDbscan` implementation when
+  `boruvka: true` is set. Previously, this misplacement caused `HDbscan` with
+  `boruvka: true` to produce a heavier Minimum Spanning Tree (MST) than when
+  `boruvka: false` was set. (PR #67 from @azizkayumov)
+
+## [0.7.0] - 2023-12-21
+
+### Changed
+
+- Requires Rust 1.70 or later.
+
 ## [0.6.0] - 2023-08-07
 
 ### Changed
@@ -85,6 +104,8 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 - The [OPTICS](https://en.wikipedia.org/wiki/OPTICS_algorithm) clustering
   algorithm.
 
+[0.8.0]: https://github.com/petabi/petal-clustering/compare/0.7.0...0.8.0
+[0.7.0]: https://github.com/petabi/petal-clustering/compare/0.6.0...0.7.0
 [0.6.0]: https://github.com/petabi/petal-clustering/compare/0.5.1...0.6.0
 [0.5.1]: https://github.com/petabi/petal-clustering/compare/0.5.0...0.5.1
 [0.5.0]: https://github.com/petabi/petal-clustering/compare/0.4.0...0.5.0
